@@ -9,52 +9,64 @@ import (
 )
 
 type Media struct {
-	path string
-	hash uint32
-	file *os.File
+	Path string
+	Hash uint32
 }
 
-func New(path string) (Media, error) {
-	var m Media
+func (m *Media) Ext() string {
+	return filepath.Ext(m.Path)
+}
+
+func New(path string) (*Media, error) {
+	m := new(Media)
 	buf := make([]byte, 64)
 
-	m.path = path
+	m.Path = path
 
-	_, err := m.Read(buf)
+	f, err := os.Open(m.Path)
+	if err != nil {
+		return m, err
+	}
+	defer f.Close()
+
+	_, err = f.Read(buf)
 	if err != nil && err != io.EOF {
 		return m, err
 	}
 
 	h := fnv.New32a()
 	_, _ = h.Write(buf)
-	m.hash = h.Sum32()
+	m.Hash = h.Sum32()
 
-	return m, m.Close()
+	return m, nil
 }
 
-func (m *Media) Path() string {
-	return m.path
-}
-
-func (m *Media) Ext() string {
-	return filepath.Ext(m.path)
-}
-
-func (m *Media) Compare(m2 *Media) (bool, error) {
-	if m.Ext() != m2.Ext() {
+func Compare(m1, m2 *Media) (bool, error) {
+	if m1.Ext() != m2.Ext() {
 		return false, nil
 	}
 
-	if m.hash != m2.hash {
+	if m1.Hash != m2.Hash {
 		return false, nil
 	}
 
-	r := bufio.NewReader(m)
-	r2 := bufio.NewReader(m2)
+	f1, err := os.Open(m1.Path)
+	if err != nil {
+		return false, err
+	}
+	defer f1.Close()
+
+	f2, err := os.Open(m2.Path)
+	if err != nil {
+		return false, err
+	}
+	defer f2.Close()
+
+	r := bufio.NewReader(f1)
+	r2 := bufio.NewReader(f2)
 
 	var b byte
 	var b2 byte
-	var err error
 	var err2 error
 	for {
 		b, err = r.ReadByte()
@@ -71,39 +83,9 @@ func (m *Media) Compare(m2 *Media) (bool, error) {
 		}
 
 		if b != b2 {
-			_ = m.Close()
-			_ = m2.Close()
-
 			return false, nil
 		}
 	}
 
 	return true, nil
-}
-
-func (m *Media) Read(p []byte) (n int, err error) {
-	if m.file == nil {
-		m.file, err = os.Open(m.path)
-	}
-
-	if err != nil {
-		return 0, err
-	}
-
-	return m.file.Read(p)
-}
-
-func (m *Media) Close() error {
-	if m.file == nil {
-		return nil
-	}
-
-	err := m.file.Close()
-	if err != nil {
-		return err
-	}
-
-	m.file = nil
-
-	return nil
 }
