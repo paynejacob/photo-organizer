@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"io/fs"
@@ -172,19 +171,19 @@ func writeMedia(m *media.Media, path string) error {
 
 	src, err := os.Open(m.Path)
 	if err != nil {
-		logrus.Fatal(err)
+		return err
 	}
 	defer src.Close()
 
-	var buf bytes.Buffer
-	_, err = io.Copy(&buf, src)
+	dest, err := os.Open(path)
 	if err != nil {
-		logrus.Fatal(err)
+		return err
 	}
+	defer dest.Close()
 
-	err = os.WriteFile(path, buf.Bytes(), 0700)
+	_, err = io.Copy(dest, src)
 	if err != nil {
-		logrus.Fatal(err)
+		return err
 	}
 
 	logrus.Infof("wrote %s", path)
