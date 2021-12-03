@@ -175,7 +175,7 @@ func writeMedia(m *media.Media, path string) error {
 	}
 	defer src.Close()
 
-	dest, err := os.Open(path)
+	dest, err := os.Create(path)
 	if err != nil {
 		return err
 	}
