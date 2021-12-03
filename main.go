@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"photo-organizer/pkg/media"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/barasher/go-exiftool"
@@ -45,8 +47,61 @@ func main() {
 		logrus.Fatal("failed to cleanup destination FS")
 	}
 
+	var wg sync.WaitGroup
+	var mu sync.RWMutex
+	uniqueMedia := map[uint32]*media.Media{}
+	C := make(chan string)
+	for i := 0; i < runtime.NumCPU(); i++ {
+		go func() {
+			wg.Add(1)
+
+			et, _ := exiftool.NewExiftool()
+
+			for {
+				path, cont := <-C
+				if !cont {
+					break
+				}
+
+				var m *media.Media
+				m, err = media.New(path)
+				if err != nil {
+					logrus.Errorf("failed to compute hash for %s", path)
+					continue
+				}
+
+				mu.RLock()
+				if uniqueMedia[m.Hash] != nil {
+					match, err := media.Compare(m, uniqueMedia[m.Hash])
+					if err != nil {
+						logrus.Errorf("failed to compare %s <> %s", path, uniqueMedia[m.Hash].Path)
+
+						mu.RUnlock()
+						continue
+					}
+					if match {
+						mu.RUnlock()
+						continue
+					}
+				}
+				mu.RUnlock()
+
+				mu.Lock()
+				uniqueMedia[m.Hash] = m
+				mu.Unlock()
+
+				ts := getMediaDate(et, m)
+				err = writeMedia(m, filepath.Join(dest, fmt.Sprintf("/%d/%d/%d%s", ts.Year(), ts.Month(), m.Hash, m.Ext())))
+				if err != nil {
+					logrus.Errorf("failed to write media %s", path)
+				}
+			}
+
+			wg.Done()
+		}()
+	}
+
 	// gather all files
-	var allMedia []*media.Media
 	for _, source := range os.Args[1 : len(os.Args)-1] {
 		err = filepath.WalkDir(source, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -59,14 +114,7 @@ func main() {
 
 			for _, ext := range allowedExtensions {
 				if filepath.Ext(path) == ext {
-					var m *media.Media
-					m, err = media.New(path)
-					if err != nil {
-						return err
-					}
-
-					allMedia = append(allMedia, m)
-
+					C <- path
 					return nil
 				}
 			}
@@ -78,29 +126,8 @@ func main() {
 		}
 	}
 
-	// find unique media
-	et, _ := exiftool.NewExiftool()
-	uniqueMedia := map[uint32]*media.Media{}
-	for _, m := range allMedia {
-		if uniqueMedia[m.Hash] != nil {
-			ok, err := media.Compare(m, uniqueMedia[m.Hash])
-			if err != nil {
-				logrus.Fatalf("failed to compare files: %s %s", m.Path, uniqueMedia[m.Hash].Path)
-			}
-
-			if ok {
-				continue
-			}
-		}
-
-		uniqueMedia[m.Hash] = m
-
-		ts := getMediaDate(et, m)
-		err = writeMedia(m, filepath.Join(dest, fmt.Sprintf("/%d/%d/%d%s", ts.Year(), ts.Month(), m.Hash, m.Ext())))
-		if err != nil {
-			logrus.Errorf("failed to write media for %s", m.Path)
-		}
-	}
+	close(C)
+	wg.Wait()
 }
 
 func getMediaDate(et *exiftool.Exiftool, m *media.Media) time.Time {
