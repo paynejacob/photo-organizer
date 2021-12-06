@@ -89,3 +89,31 @@ func Compare(m1, m2 *Media) (bool, error) {
 
 	return true, nil
 }
+
+func Distinct(mm ...*Media) ([]*Media, error) {
+	var result []*Media
+	uniqueMedia := make(map[uint32]interface{})
+	for _, m := range mm {
+		var buf []byte
+		f, err := os.Open(m.Path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		_, err = f.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+
+		h := fnv.New32a()
+		_, _ = h.Write(buf)
+		hv := h.Sum32()
+		if _, exists := uniqueMedia[hv]; !exists {
+			uniqueMedia[hv] = struct{}{}
+			result = append(result, m)
+		}
+	}
+
+	return result, nil
+}

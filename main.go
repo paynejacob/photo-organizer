@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/barasher/go-exiftool"
+
 	"github.com/sirupsen/logrus"
 )
 
@@ -47,14 +48,13 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	var mu sync.RWMutex
-	uniqueMedia := map[uint32]*media.Media{}
+	var mu sync.Mutex
+	allMedia := map[uint32][]*media.Media{}
 	C := make(chan string)
 	for i := 0; i < runtime.NumCPU(); i++ {
 		go func() {
+			mm := map[uint32][]*media.Media{}
 			wg.Add(1)
-
-			et, _ := exiftool.NewExiftool()
 
 			for {
 				path, cont := <-C
@@ -65,42 +65,25 @@ func main() {
 				var m *media.Media
 				m, err = media.New(path)
 				if err != nil {
-					logrus.Errorf("failed to compute hash for %s", path)
+					logrus.Errorf("failed to compute short hash for %s", path)
 					continue
 				}
 
-				mu.RLock()
-				if uniqueMedia[m.Hash] != nil {
-					match, err := media.Compare(m, uniqueMedia[m.Hash])
-					if err != nil {
-						logrus.Errorf("failed to compare %s <> %s", path, uniqueMedia[m.Hash].Path)
-
-						mu.RUnlock()
-						continue
-					}
-					if match {
-						mu.RUnlock()
-						continue
-					}
-				}
-				mu.RUnlock()
-
-				mu.Lock()
-				uniqueMedia[m.Hash] = m
-				mu.Unlock()
-
-				ts := getMediaDate(et, m)
-				err = writeMedia(m, filepath.Join(dest, fmt.Sprintf("/%d/%d/%d%s", ts.Year(), ts.Month(), m.Hash, m.Ext())))
-				if err != nil {
-					logrus.Errorf("failed to write media %s", path)
-				}
+				mm[m.Hash] = append(mm[m.Hash], m)
 			}
+
+			mu.Lock()
+			for h, m := range mm {
+				allMedia[h] = append(allMedia[h], m...)
+			}
+			mu.Unlock()
 
 			wg.Done()
 		}()
 	}
 
 	// gather all files
+	logrus.Info("discovering files")
 	for _, source := range os.Args[1 : len(os.Args)-1] {
 		err = filepath.WalkDir(source, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -118,6 +101,8 @@ func main() {
 				}
 			}
 
+			logrus.Warnf("skipping invalid extension: %s", path)
+
 			return nil
 		})
 		if err != nil {
@@ -126,6 +111,73 @@ func main() {
 	}
 
 	close(C)
+	wg.Wait()
+
+	var nPaths int
+	for _, m := range allMedia {
+		nPaths += len(m)
+	}
+
+	logrus.Infof("found %d files", nPaths)
+
+	logrus.Info("calculating unique files")
+	var uniqueMedia []*media.Media
+	// find unique files
+	for _, mm := range allMedia {
+		if len(mm) == 1 {
+			uniqueMedia = append(uniqueMedia, mm[0])
+			continue
+		}
+
+		mm, err = media.Distinct(mm...)
+		if err != nil {
+			logrus.Fatal(err)
+		}
+
+		uniqueMedia = append(uniqueMedia, mm...)
+	}
+
+	logrus.Infof("found %d unique files", len(uniqueMedia))
+
+	wg = sync.WaitGroup{}
+	mC := make(chan *media.Media)
+	for i := 0; i < runtime.NumCPU()*2; i++ {
+		go func() {
+			wg.Add(1)
+
+			et, _ := exiftool.NewExiftool()
+
+			for {
+				m, cont := <-mC
+				if !cont {
+					break
+				}
+
+				ts := getMediaDate(et, m)
+				if ts.IsZero() {
+					logrus.Errorf("failed to get timestamp for media: %s", m.Path)
+					continue
+				}
+
+				err := writeMedia(m, fmt.Sprintf("%s/%d/%d/%d%s", dest, ts.Year(), ts.Month(), m.Hash, m.Ext()))
+				if err != nil {
+					logrus.Errorf("failed to copy media: %s", m.Path)
+					continue
+				}
+
+				logrus.Debugf("processed media: %s", m.Path)
+			}
+
+			wg.Done()
+		}()
+	}
+
+	logrus.Info("writing files")
+	for _, m := range uniqueMedia {
+		mC <- m
+	}
+
+	close(mC)
 	wg.Wait()
 }
 
@@ -142,10 +194,12 @@ func getMediaDate(et *exiftool.Exiftool, m *media.Media) time.Time {
 		ts, _ = fileInfo.GetString("MediaCreateDate")
 	} else if _date, ok = fileInfo.Fields["FileModifyDate"]; ok && _date != nil {
 		ts, _ = fileInfo.GetString("FileModifyDate")
+	} else if _date, ok = fileInfo.Fields["FileInodeChangeDate"]; ok && _date != nil {
+		ts, _ = fileInfo.GetString("FileInodeChangeDate")
 	} else {
 		_, ts = filepath.Split(m.Path)
 		ts = strings.Replace(ts, m.Ext(), "", 1)
-		ts = ts[:17]
+		ts = strings.Split(ts, "_")[0]
 	}
 
 	var t time.Time
@@ -156,6 +210,14 @@ func getMediaDate(et *exiftool.Exiftool, m *media.Media) time.Time {
 		return t
 	} else if t, err = time.Parse("06-01-02 15-04-05", ts); err == nil {
 		return t
+	}
+
+	parts := strings.Split(m.Path, "/")
+	if len(parts) >= 3 {
+		t, err := time.Parse("2006/01", parts[len(parts)-3]+"/"+parts[len(parts)-2])
+		if err == nil {
+			return t
+		}
 	}
 
 	return time.Time{}
@@ -185,8 +247,6 @@ func writeMedia(m *media.Media, path string) error {
 	if err != nil {
 		return err
 	}
-
-	logrus.Infof("wrote %s", path)
 
 	return nil
 }
